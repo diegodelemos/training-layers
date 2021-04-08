@@ -30,6 +30,53 @@ Implement the following REST API:
 
 The API should list all todo items for a given user. You'll need to make
 changes to both the data, service and presentation layer.
+
+Testing the solution:
+
+1. Create some todos
+
+    curl -X POST \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d '{"id": 1, "title": "Morning run", "priority": 1}' \
+        "http://127.0.0.1:5000/todos?user=1"
+
+    curl -X POST \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d '{"id": 2, "title": "Lunch time run", "priority": 1}' \
+        "http://127.0.0.1:5000/todos?user=1"
+
+    curl -X POST \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d '{"id": 3, "title": "Buy beer", "priority": 1}' \
+        "http://127.0.0.1:5000/todos?user=2"
+
+    curl -X POST \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d '{"id": 4, "title": "Buy snacks", "priority": 1}' \
+        "http://127.0.0.1:5000/todos?user=2"
+
+
+2. Test that the new endpoint lists only the todos owned by the user:
+
+    $ curl -sX GET \
+        -H "Accept: application/json" \
+        "http://127.0.0.1:5000/todos?user=1" | jq ".[].title"
+
+    "Morning run"
+    "Lunch time run"
+
+    $ curl -sX GET \
+        -H "Accept: application/json" \
+        "http://127.0.0.1:5000/todos?user=2" | jq ".[].title"
+
+    "Buy beer"
+    "Buy snacks"
+
+Note: clearly user 1 is more sportive than user 2. However, user 2 has more friends.
 """
 
 import marshmallow as ma
@@ -68,6 +115,10 @@ class TodoDatabase:
         if id_ not in cls.db:
             raise NoResultError(id_)
         return cls.db[id_]
+
+    @classmethod
+    def get_all(cls):
+        return cls.db.values()
 
 
 class TodoItem:
@@ -127,6 +178,18 @@ class TodoService(Service):
         # Return the wrapped item.
         return self.result_item(item, identity, self.config.links_item)
 
+    def list_(self, identity):
+        item_list = []
+        for item in TodoDatabase.get_all():
+            if self.check_permission(identity, "read", item=item):
+                item_list.append(self.result_item(item, identity, self.config.links_item))
+
+        # Return the wrapped item.
+        return self.result_list(item_list)
+
+
+class UnknownResultType(Exception):
+    pass
 
 class TodoItemResult:
     def __init__(self, item, identity, links_tpl):
@@ -144,7 +207,19 @@ class TodoItemResult:
             "links": LinksTemplate(self._links_tpl).expand(self._item)
         }
 
+class TodoItemResultList:
+    def __init__(self, item_list=None):
+        self.item_list = item_list or []
+        for item in self.item_list:
+            if not isinstance(item, TodoItemResult):
+                    raise UnknownResultType(item)
 
+    def to_list(self):
+        item_list = []
+        for item in self.item_list:
+            item_list.append(item.to_dict())
+
+        return item_list
 
 #
 # Presentation layer - RESTful resources
@@ -211,6 +286,7 @@ class TodoResource(Resource):
             #   request context<<. More on that below.
             # You are not required to use the "route()".
             route("POST", "", self.create),
+            route("GET", "", self.list_),
             route("GET", "/<item_id>", self.read),
         ]
 
@@ -287,6 +363,15 @@ class TodoResource(Resource):
 
         return item.to_dict(), 200
 
+    @user_request_parser
+    @response_handler()
+    def list_(self):
+        identity = self._make_identity(resource_requestctx.args['user'])
+
+        item_list = self.service.list_(identity)
+
+        return item_list.to_list(), 200
+
 
 # This is the end of the three layers - presentation, service and data.
 # =============================================================================
@@ -351,6 +436,7 @@ class TodoSchema(ma.Schema):
 class TodoServiceConfig(ServiceConfig):
     permission_policy_cls = TodoPermissionPolicy
     result_item_cls = TodoItemResult
+    result_list_cls = TodoItemResultList
     todo_item_cls = TodoItem
     schema_cls = TodoSchema
 
